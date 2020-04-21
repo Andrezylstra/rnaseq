@@ -623,7 +623,7 @@ if (compressedReference) {
         file "${gz.simpleName}" into salmon_index
 
         script:
-        // Use tar as the hisat2 indices are a folder, not a file
+        // Use tar as the Salmon indices are a folder, not a file
         """
         tar -xzvf ${gz}
         """
@@ -793,13 +793,28 @@ if (params.pseudo_aligner == 'salmon' && !params.salmon_index) {
             file gtf from gtf_makeSalmonIndex
 
             output:
-            file "*.fa" into ch_fasta_for_salmon_index
+            file "gentrome.fa" into ch_fasta_for_salmon_index
+            file "decoys.txt" into ch_decoys_for_salmon_index
+
+            file "transcripts.fa" into ch_testing
+            file "${gtf.baseName}__in__${fasta.baseName}.gtf" into ch_testing2
 
             script:
-	          // filter_gtf_for_genes_in_genome.py is bundled in this package, in rnaseq/bin
+	          /* filter_gtf_for_genes_in_genome.py is bundled in this package, in rnaseq/bin
+               * use -x option for CDS rather than exons to match other processes
+               * to make decoy aware index salmon needs transcripts AND decoy sequences
+               * in the same fasta with transcripts first.  
+               * Also needs a text file with decoy names
+               * First operation is to remove spaces in fasta references
+              */
+
             """
             filter_gtf_for_genes_in_genome.py --gtf $gtf --fasta $fasta -o ${gtf.baseName}__in__${fasta.baseName}.gtf
-            gffread -F -w transcripts.fa -g $fasta ${gtf.baseName}__in__${fasta.baseName}.gtf
+            gffread -F -x transcripts.fa -g $fasta ${gtf.baseName}__in__${fasta.baseName}.gtf
+            sed 's/ /_/g' $fasta > fixed.fa
+            cat transcripts.fa fixed.fa > gentrome.fa
+            cat fixed.fa | grep "^>" > decoys.txt
+            sed -i.bak -e 's/>//g' decoys.txt
             """
         }
     }
@@ -810,7 +825,8 @@ if (params.pseudo_aligner == 'salmon' && !params.salmon_index) {
                            saveAs: { params.saveReference ? it : null }, mode: 'copy'
 
         input:
-        file fasta from ch_fasta_for_salmon_index
+        file gentrome_fasta from ch_fasta_for_salmon_index
+        file decoys from ch_decoys_for_salmon_index
 
         output:
         file 'salmon_index' into salmon_index
@@ -818,7 +834,7 @@ if (params.pseudo_aligner == 'salmon' && !params.salmon_index) {
         script:
         def gencode = params.gencode  ? "--gencode" : ""
         """
-        salmon index --threads $task.cpus -t $fasta $gencode -i salmon_index
+        salmon index --threads $task.cpus -t $gentrome_fasta -d $decoys $gencode -i salmon_index
         """
     }
 }
@@ -1558,9 +1574,10 @@ if (params.pseudo_aligner == 'salmon') {
         }
         def endedness = params.singleEnd ? "-r ${reads[0]}" : "-1 ${reads[0]} -2 ${reads[1]}"
         unmapped = params.saveUnaligned ? "--writeUnmappedNames" : ''
+        
+        // Don't use --gcbias yet since this is in beta for single end reads for Salmon 1.2.0
         """
-        salmon quant --validateMappings \\
-                        --seqBias --useVBOpt --gcBias \\
+        salmon quant --seqBias \\
                         --geneMap ${gtf} \\
                         --threads ${task.cpus} \\
                         --libType=${rnastrandness} \\
